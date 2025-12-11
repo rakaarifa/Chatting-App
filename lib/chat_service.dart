@@ -1,177 +1,136 @@
+import 'dart:convert';
 import 'dart:typed_data';
+import 'package:http/http.dart' as http;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_storage/firebase_storage.dart';
 
 class ChatService {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
-  final FirebaseStorage _storage = FirebaseStorage.instance;
+  final String imgbbApiKey = '66db1b42ef2a5648c56f4a36a3ac907f';
 
-  String _getChatRoomId(String userId1, String userId2) {
-    return userId1.hashCode <= userId2.hashCode
-        ? '${userId1}_$userId2'
-        : '${userId2}_$userId1';
-  }
+  // --- FITUR BARU: BUAT GRUP ---
+  Future<void> createGroup(
+      String groupName, List<String> memberIds, Uint8List? imageFile) async {
+    String currentUserId = _auth.currentUser!.uid;
+    List<String> allMembers = [...memberIds, currentUserId];
+    String? groupIconUrl;
 
-  // --- KIRIM PESAN ---
-  Future<void> sendMessage(String recipientId, String message,
-      {Map<String, dynamic>? replyTo}) async {
-    await _sendToFirestore(recipientId, message, 'text', replyTo: replyTo);
-  }
-
-  Future<void> sendImageMessage(
-      String recipientId, Uint8List fileBytes, String fileName,
-      {Map<String, dynamic>? replyTo}) async {
-    final currentUser = _auth.currentUser;
-    if (currentUser == null) return;
-
-    try {
-      String uniqueName = "${DateTime.now().millisecondsSinceEpoch}_$fileName";
-      Reference ref = _storage.ref().child('chat_images/$uniqueName');
-
-      final metadata = SettableMetadata(contentType: 'image/jpeg');
-      UploadTask uploadTask = ref.putData(fileBytes, metadata);
-      String downloadUrl = await (await uploadTask).ref.getDownloadURL();
-
-      await _sendToFirestore(recipientId, downloadUrl, 'image',
-          replyTo: replyTo);
-    } catch (e) {
-      throw Exception("Gagal kirim gambar: $e");
+    // 1. Upload Foto Grup jika ada
+    if (imageFile != null) {
+      groupIconUrl = await _uploadToImgBB(imageFile);
     }
+
+    // 2. Buat Dokumen Grup
+    DocumentReference newGroupRef = _firestore.collection('chat_rooms').doc();
+
+    await newGroupRef.set({
+      'isGroup': true,
+      'groupName': groupName,
+      'groupIcon': groupIconUrl,
+      'adminId': currentUserId,
+      'userIds': allMembers,
+      'lastMessage': 'Grup dibuat',
+      'lastTime': FieldValue.serverTimestamp(),
+      'typing': {},
+    });
+
+    // 3. Pesan Sistem Awal
+    await newGroupRef.collection('messages').add({
+      'senderId': 'system',
+      'message': 'Grup "$groupName" telah dibuat.',
+      'timestamp': FieldValue.serverTimestamp(),
+      'type': 'system',
+      'isRead': true,
+    });
   }
 
-  // --- CORE LOGIC ---
-  Future<void> _sendToFirestore(String recipientId, String content, String type,
+  // --- KIRIM PESAN (Support Grup & Private) ---
+  Future<void> sendMessage(String roomId, String message,
       {Map<String, dynamic>? replyTo}) async {
-    final currentUser = _auth.currentUser;
-    if (currentUser == null) return;
+    final String currentUserId = _auth.currentUser!.uid;
+    final Timestamp timestamp = Timestamp.now();
 
-    final chatRoomId = _getChatRoomId(currentUser.uid, recipientId);
-
-    final messageData = {
-      'senderId': currentUser.uid,
-      'receiverId': recipientId,
-      'message': content,
-      'type': type,
-      'timestamp': FieldValue.serverTimestamp(),
+    Map<String, dynamic> newMessage = {
+      'senderId': currentUserId,
+      'message': message,
+      'timestamp': timestamp,
+      'type': 'text',
       'isRead': false,
       'replyTo': replyTo,
-      'isEdited': false, // Field baru: Status Edit
-      'reactions': {}, // Field baru: Reactions Map {uid: emoji}
     };
 
     await _firestore
         .collection('chat_rooms')
-        .doc(chatRoomId)
+        .doc(roomId)
         .collection('messages')
-        .add(messageData);
-
-    String previewMsg = type == 'image' ? '📷 Gambar' : content;
-    await _firestore.collection('chat_rooms').doc(chatRoomId).set({
-      'participants': [currentUser.uid, recipientId],
-      'lastMessage': previewMsg,
-      'lastMessageTime': FieldValue.serverTimestamp(),
-      'senderId': currentUser.uid,
-      'unreadCount_${recipientId}': FieldValue.increment(1),
-    }, SetOptions(merge: true));
-  }
-
-  // --- FITUR BARU: EDIT PESAN ---
-  Future<void> editMessage(
-      String recipientId, String messageId, String newContent) async {
-    final currentUser = _auth.currentUser;
-    if (currentUser == null) return;
-    final chatRoomId = _getChatRoomId(currentUser.uid, recipientId);
-
-    await _firestore
-        .collection('chat_rooms')
-        .doc(chatRoomId)
-        .collection('messages')
-        .doc(messageId)
-        .update({
-      'message': newContent,
-      'isEdited': true, // Tandai sebagai diedit
+        .add(newMessage);
+    await _firestore.collection('chat_rooms').doc(roomId).update({
+      'lastMessage': message,
+      'lastTime': timestamp,
+      'unreadCount': FieldValue.increment(1), // Simplifikasi untuk grup
     });
   }
 
-  // --- FITUR BARU: TOGGLE REACTION ---
-  Future<void> toggleReaction(
-      String recipientId, String messageId, String emoji) async {
-    final currentUser = _auth.currentUser;
-    if (currentUser == null) return;
-    final chatRoomId = _getChatRoomId(currentUser.uid, recipientId);
+  // --- KIRIM GAMBAR ---
+  Future<void> sendImageMessage(String roomId, Uint8List file,
+      {Map<String, dynamic>? replyTo}) async {
+    String currentUserId = _auth.currentUser!.uid;
+    String? downloadUrl = await _uploadToImgBB(file);
+    if (downloadUrl == null) return;
 
-    final docRef = _firestore
+    Map<String, dynamic> newMessage = {
+      'senderId': currentUserId,
+      'message': downloadUrl,
+      'timestamp': Timestamp.now(),
+      'type': 'image',
+      'isRead': false,
+      'replyTo': replyTo,
+    };
+
+    await _firestore
         .collection('chat_rooms')
-        .doc(chatRoomId)
+        .doc(roomId)
         .collection('messages')
-        .doc(messageId);
-    final docSnapshot = await docRef.get();
-
-    if (docSnapshot.exists) {
-      Map<String, dynamic> reactions = docSnapshot.data()?['reactions'] ?? {};
-
-      // Jika user sudah kasih reaksi yg sama -> Hapus (Toggle Off)
-      // Jika beda atau belum ada -> Update (Toggle On)
-      if (reactions[currentUser.uid] == emoji) {
-        reactions.remove(currentUser.uid);
-      } else {
-        reactions[currentUser.uid] = emoji;
-      }
-
-      await docRef.update({'reactions': reactions});
-    }
+        .add(newMessage);
+    await _firestore.collection('chat_rooms').doc(roomId).update({
+      'lastMessage': '📷 Foto',
+      'lastTime': Timestamp.now(),
+    });
   }
 
-  // --- STANDARD FEATURES ---
-  Stream<QuerySnapshot> getMessages(String recipientId) {
-    final currentUser = _auth.currentUser;
-    if (currentUser == null) throw Exception('User null');
-    final chatRoomId = _getChatRoomId(currentUser.uid, recipientId);
+  // Helper Upload
+  Future<String?> _uploadToImgBB(Uint8List file) async {
+    try {
+      var uri = Uri.parse("https://api.imgbb.com/1/upload?key=$imgbbApiKey");
+      var request = http.MultipartRequest("POST", uri);
+      request.files.add(
+          http.MultipartFile.fromBytes('image', file, filename: 'upload.jpg'));
+      var response = await request.send();
+      if (response.statusCode == 200) {
+        var res = await response.stream.toBytes();
+        return jsonDecode(String.fromCharCodes(res))['data']['url'];
+      }
+    } catch (e) {
+      print(e);
+    }
+    return null;
+  }
+
+  // Get Messages
+  Stream<QuerySnapshot> getMessages(String roomId) {
     return _firestore
         .collection('chat_rooms')
-        .doc(chatRoomId)
+        .doc(roomId)
         .collection('messages')
         .orderBy('timestamp', descending: false)
         .snapshots();
   }
 
-  Future<void> markMessagesAsRead(String recipientId) async {
-    final currentUser = _auth.currentUser;
-    if (currentUser == null) return;
-    final chatRoomId = _getChatRoomId(currentUser.uid, recipientId);
-    await _firestore
-        .collection('chat_rooms')
-        .doc(chatRoomId)
-        .update({'unreadCount_${currentUser.uid}': 0});
-  }
-
-  Future<void> deleteMessage(String recipientId, String messageId) async {
-    final currentUser = _auth.currentUser;
-    if (currentUser == null) return;
-    final chatRoomId = _getChatRoomId(currentUser.uid, recipientId);
-    await _firestore
-        .collection('chat_rooms')
-        .doc(chatRoomId)
-        .collection('messages')
-        .doc(messageId)
-        .delete();
-  }
-
-  Future<void> setTypingStatus(String recipientId, bool isTyping) async {
-    final currentUser = _auth.currentUser;
-    if (currentUser == null) return;
-    final chatRoomId = _getChatRoomId(currentUser.uid, recipientId);
-    await _firestore.collection('chat_rooms').doc(chatRoomId).set({
-      'typing': {currentUser.uid: isTyping}
-    }, SetOptions(merge: true));
-  }
-
-  Stream<DocumentSnapshot> getChatRoomStream(String recipientId) {
-    final currentUser = _auth.currentUser;
-    if (currentUser == null) return Stream.empty();
-    final chatRoomId = _getChatRoomId(currentUser.uid, recipientId);
-    return _firestore.collection('chat_rooms').doc(chatRoomId).snapshots();
+  // Cek ID Room Private (Helper)
+  String getPrivateRoomId(String userId1, String userId2) {
+    List<String> ids = [userId1, userId2];
+    ids.sort();
+    return ids.join('_');
   }
 }

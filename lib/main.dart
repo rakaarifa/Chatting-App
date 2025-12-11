@@ -18,7 +18,6 @@ Future<void> main() async {
   );
 }
 
-// Widget untuk memantau App Lifecycle (Online/Offline status)
 class LifecycleWatcher extends StatefulWidget {
   final Widget child;
   const LifecycleWatcher({super.key, required this.child});
@@ -34,6 +33,7 @@ class _LifecycleWatcherState extends State<LifecycleWatcher>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _authService.setUserOnlineStatus(true);
   }
 
   @override
@@ -64,47 +64,51 @@ class ChatApp extends StatelessWidget {
       builder: (context, themeProvider, child) {
         return MaterialApp(
           debugShowCheckedModeBanner: false,
-          title: 'ProChat',
-          // --- TEMA TERANG (LIGHT) ---
-          theme: ThemeData(
-            useMaterial3: true,
-            brightness: Brightness.light,
-            colorScheme: ColorScheme.fromSeed(
-              seedColor: const Color(0xFF2563EB), // Royal Blue
-              primary: const Color(0xFF2563EB),
-              secondary: const Color(0xFF1E40AF),
-              surface: const Color(0xFFF1F5F9), // Putih Kebiruan (Slate)
-            ),
-            textTheme: GoogleFonts.interTextTheme(),
-            appBarTheme: const AppBarTheme(
-              backgroundColor: Colors.transparent,
-              elevation: 0,
-              titleTextStyle: TextStyle(
-                  color: Colors.black87,
-                  fontSize: 22,
-                  fontWeight: FontWeight.bold),
-              iconTheme: IconThemeData(color: Colors.black87),
-            ),
-          ),
-          // --- TEMA GELAP (DARK) ---
-          darkTheme: ThemeData(
-            useMaterial3: true,
-            brightness: Brightness.dark,
-            colorScheme: ColorScheme.fromSeed(
-              seedColor: const Color(0xFF3B82F6),
-              brightness: Brightness.dark,
-              surface: const Color(0xFF0F172A), // Biru Gelap Malam
-            ),
-            textTheme: GoogleFonts.interTextTheme(ThemeData.dark().textTheme),
-            appBarTheme: const AppBarTheme(
-              backgroundColor: Colors.transparent,
-              elevation: 0,
-            ),
-          ),
+          title: 'NeoChat',
+          theme: _buildTheme(Brightness.light),
+          darkTheme: _buildTheme(Brightness.dark),
           themeMode: themeProvider.themeMode,
           home: const AuthWrapper(),
         );
       },
+    );
+  }
+
+  ThemeData _buildTheme(Brightness brightness) {
+    var baseTheme = ThemeData(brightness: brightness, useMaterial3: true);
+
+    // Warna Premium
+    var primary = const Color(0xFF6366F1); // Indigo Modern
+    var surface = brightness == Brightness.light
+        ? const Color(0xFFF1F5F9)
+        : const Color(0xFF0F172A);
+    var card =
+        brightness == Brightness.light ? Colors.white : const Color(0xFF1E293B);
+
+    return baseTheme.copyWith(
+      colorScheme: ColorScheme.fromSeed(
+        seedColor: primary,
+        brightness: brightness,
+        primary: primary,
+        surface: surface,
+        surfaceContainerHighest: card, // Untuk Card Color
+      ),
+      textTheme: GoogleFonts.plusJakartaSansTextTheme(baseTheme.textTheme),
+      appBarTheme: AppBarTheme(
+        backgroundColor: surface,
+        elevation: 0,
+        surfaceTintColor: Colors.transparent,
+        titleTextStyle: GoogleFonts.plusJakartaSans(
+            fontSize: 22,
+            fontWeight: FontWeight.w700,
+            color:
+                brightness == Brightness.light ? Colors.black87 : Colors.white),
+        iconTheme: IconThemeData(
+            color:
+                brightness == Brightness.light ? Colors.black87 : Colors.white),
+      ),
+      scaffoldBackgroundColor: surface,
+      cardColor: card,
     );
   }
 }
